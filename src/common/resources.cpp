@@ -659,10 +659,35 @@ Try<Resources> Resources::apply(const Offer::Operation& operation) const
       // Launch operation does not alter the offered resources.
       break;
 
-    case Offer::Operation::RESERVE:
-    case Offer::Operation::UNRESERVE:
-      // TODO(mpark): Provide implementation.
-      return Error("Unimplemented");
+    case Offer::Operation::RESERVE: {
+      foreach (const Resource& reserved, operation.reserve().resources()) {
+        Resources unreserved = Resources(reserved).flatten();
+
+        if (!result.contains(unreserved)) {
+          return Error("Invalid RESERVE Operation: " + stringify(result) +
+                       " does not contain " + stringify(unreserved));
+        }
+
+        result -= unreserved;
+        result += reserved;
+      }
+      break;
+    }
+
+    case Offer::Operation::UNRESERVE: {
+      foreach (const Resource& reserved, operation.unreserve().resources()) {
+        if (!result.contains(reserved)) {
+          return Error("Invalid UNRESERVE Operation: " + stringify(result) +
+                       " does not contain " + stringify(reserved));
+        }
+
+        Resources unreserved = Resources(reserved).flatten();
+
+        result -= reserved;
+        result += unreserved;
+      }
+      break;
+    }
 
     case Offer::Operation::CREATE: {
       Option<Error> error = validate(operation.create().volumes());

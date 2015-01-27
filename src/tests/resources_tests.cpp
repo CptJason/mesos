@@ -1077,6 +1077,23 @@ TEST(DiskResourcesTest, FilterPersistentVolumes)
 }
 
 
+TEST(ResourcesOperationTest, DynamicReservation) {
+  Resources total = Resources::parse("cpus:1;mem:512").get();
+
+  Resource cpus1 = createReservedResource(
+      "cpus", "1", "role", createReservationInfo("principal"));
+
+  EXPECT_SOME_EQ(Resources::parse("mem:512").get() + cpus1,
+                 total.apply(RESERVE(cpus1)));
+
+  // Check the case of insufficient unreserved resources.
+  Resource cpus2 = createReservedResource(
+      "cpus", "2", "role", createReservationInfo("principal"));
+
+  EXPECT_ERROR(total.apply(RESERVE(cpus2)));
+}
+
+
 TEST(ResourcesOperationTest, CreatePersistentVolume)
 {
   Resources total = Resources::parse("cpus:1;mem:512;disk(role):1000").get();
