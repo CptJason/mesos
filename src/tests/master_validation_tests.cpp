@@ -54,6 +54,7 @@ using process::Clock;
 using process::Future;
 using process::PID;
 
+using std::string;
 using std::vector;
 
 using testing::_;
@@ -75,6 +76,30 @@ protected:
     return resources;
   }
 };
+
+
+TEST_F(ResourceValidationTest, StaticReservation)
+{
+  Resource resource = Resources::parse("cpus", "8", "role").get();
+  EXPECT_NONE(resource::validate(CreateResources(resource)));
+}
+
+
+TEST_F(ResourceValidationTest, DynamicReservation)
+{
+  Resource resource = Resources::parse("cpus", "8", "role").get();
+  resource.mutable_reservation()->CopyFrom(createReservationInfo("principal"));
+
+  EXPECT_NONE(resource::validate(CreateResources(resource)));
+}
+
+
+TEST_F(ResourceValidationTest, InvalidRoleReservationPair) {
+  Resource resource = Resources::parse("cpus", "8", "*").get();
+  resource.mutable_reservation()->CopyFrom(createReservationInfo("principal"));
+
+  EXPECT_SOME(resource::validate(CreateResources(resource)));
+}
 
 
 TEST_F(ResourceValidationTest, PersistentVolume)
@@ -138,6 +163,202 @@ TEST_F(ResourceValidationTest, NonPersistentVolume)
   volume.mutable_disk()->CopyFrom(createDiskInfo(None(), "path1"));
 
   EXPECT_SOME(resource::validate(CreateResources(volume)));
+}
+
+
+class ReserveOperationValidationTest : public MesosTest {};
+
+
+// This test verifies that all resources specified in the RESERVE
+// operation have matching role.
+TEST_F(ReserveOperationValidationTest, MatchingRole)
+{
+  string principal = "principal";
+
+  {
+    // Matching role, "role".
+    string role = "role";
+
+    Resource resource = Resources::parse("cpus", "8", role).get();
+    resource.mutable_reservation()->CopyFrom(createReservationInfo(principal));
+
+    Offer::Operation::Reserve reserve;
+    reserve.add_resources()->CopyFrom(resource);
+
+    EXPECT_NONE(operation::validate(reserve, role, principal));
+  }
+
+  {
+    // Matching role, "*", but invalid.
+    // Frameworks with "*" role cannot reserve resources.
+    Resource resource = Resources::parse("cpus", "8", "*").get();
+    resource.mutable_reservation()->CopyFrom(createReservationInfo(principal));
+
+    Offer::Operation::Reserve reserve;
+    reserve.add_resources()->CopyFrom(resource);
+
+    EXPECT_SOME(operation::validate(reserve, "*", principal));
+  }
+
+  {
+    // Non-matching role, "role" reserving for "*".
+    string role = "role";
+
+    Resource resource = Resources::parse("cpus", "8", "*").get();
+    resource.mutable_reservation()->CopyFrom(createReservationInfo(principal));
+
+    Offer::Operation::Reserve reserve;
+    reserve.add_resources()->CopyFrom(resource);
+
+    EXPECT_SOME(operation::validate(reserve, role, principal));
+  }
+
+  {
+    // Non-matching role, "*" reserving for "role".
+    string role = "role";
+
+    Resource resource = Resources::parse("cpus", "8", role).get();
+    resource.mutable_reservation()->CopyFrom(createReservationInfo(principal));
+
+    Offer::Operation::Reserve reserve;
+    reserve.add_resources()->CopyFrom(resource);
+
+    EXPECT_SOME(operation::validate(reserve, "*", principal));
+  }
+
+  {
+    // Non-matching role, "role1" reserving for "role2".
+    string role1 = "role1";
+    string role2 = "role2";
+
+    Resource resource = Resources::parse("cpus", "8", role2).get();
+    resource.mutable_reservation()->CopyFrom(createReservationInfo(principal));
+
+    Offer::Operation::Reserve reserve;
+    reserve.add_resources()->CopyFrom(resource);
+
+    EXPECT_SOME(operation::validate(reserve, role1, principal));
+  }
+}
+
+
+// This test verifies that all resources specified in the RESERVE
+// operation have matching principal.
+TEST_F(ReserveOperationValidationTest, MatchingPrincipal)
+{
+  string role = "role";
+
+  {
+    // principal matches.
+    string principal = "principal";
+
+    Resource resource = Resources::parse("cpus", "8", role).get();
+    resource.mutable_reservation()->CopyFrom(createReservationInfo(principal));
+
+    Offer::Operation::Reserve reserve;
+    reserve.add_resources()->CopyFrom(resource);
+
+    EXPECT_NONE(operation::validate(reserve, role, principal));
+  }
+
+  {
+    // principal does not match.
+    string principal1 = "principal1";
+    string principal2 = "principal2";
+
+    Resource resource = Resources::parse("cpus", "8", role).get();
+    resource.mutable_reservation()->CopyFrom(createReservationInfo(principal2));
+
+    Offer::Operation::Reserve reserve;
+    reserve.add_resources()->CopyFrom(resource);
+
+    EXPECT_SOME(operation::validate(reserve, role, principal1));
+  }
+}
+
+
+// This test verifies that no resources specified in the RESERVE
+// operation are persistent volumes.
+TEST_F(ReserveOperationValidationTest, NoPersistentVolumes)
+{
+  string role = "role";
+  string principal = "principal";
+
+  Resource reserved = Resources::parse("cpus", "8", role).get();
+  reserved.mutable_reservation()->CopyFrom(createReservationInfo(principal));
+
+  Offer::Operation::Reserve reserve;
+  reserve.add_resources()->CopyFrom(reserved);
+
+  EXPECT_NONE(operation::validate(reserve, role, principal));
+
+  Resource volume = Resources::parse("disk", "128", role).get();
+  volume.mutable_disk()->CopyFrom(createDiskInfo("id1", "path1"));
+
+  reserve.add_resources()->CopyFrom(volume);
+
+  EXPECT_SOME(operation::validate(reserve, role, principal));
+}
+
+
+class UnreserveOperationValidationTest : public MesosTest {};
+
+
+// This test verifies that any resources can be unreserved by anyone.
+// TODO(mpark): Introduce the "unreserve" ACL to prevent this.
+TEST_F(UnreserveOperationValidationTest, WithoutACL)
+{
+  string role = "role";
+
+  {
+    // principal matches.
+    string principal = "principal";
+
+    Resource resource = Resources::parse("cpus", "8", role).get();
+    resource.mutable_reservation()->CopyFrom(createReservationInfo(principal));
+
+    Offer::Operation::Unreserve unreserve;
+    unreserve.add_resources()->CopyFrom(resource);
+
+    EXPECT_NONE(operation::validate(unreserve));
+  }
+
+  {
+    // principal does not match.
+    string principal1 = "principal1";
+    string principal2 = "principal2";
+
+    Resource resource = Resources::parse("cpus", "8", role).get();
+    resource.mutable_reservation()->CopyFrom(createReservationInfo(principal2));
+
+    Offer::Operation::Unreserve unreserve;
+    unreserve.add_resources()->CopyFrom(resource);
+
+    EXPECT_NONE(operation::validate(unreserve));
+  }
+}
+
+
+// This test verifies that no resources specified in the UNRESERVE
+// operation are persistent volumes.
+TEST_F(UnreserveOperationValidationTest, NoPersistentVolumes)
+{
+  string role = "role";
+
+  Resource reserved = Resources::parse("cpus", "8", role).get();
+  reserved.mutable_reservation()->CopyFrom(createReservationInfo("principal"));
+
+  Offer::Operation::Unreserve unreserve;
+  unreserve.add_resources()->CopyFrom(reserved);
+
+  EXPECT_NONE(operation::validate(unreserve));
+
+  Resource volume = Resources::parse("disk", "128", role).get();
+  volume.mutable_disk()->CopyFrom(createDiskInfo("id1", "path1"));
+
+  unreserve.add_resources()->CopyFrom(volume);
+
+  EXPECT_SOME(operation::validate(unreserve));
 }
 
 

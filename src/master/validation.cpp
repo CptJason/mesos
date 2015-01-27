@@ -53,6 +53,22 @@ static bool invalid(char c)
 
 namespace resource {
 
+// Validates that all the given resources are dynamically-reserved.
+Option<Error> validateDynamicReservation(
+    const RepeatedPtrField<Resource>& resources)
+{
+  foreach (const Resource& resource, resources) {
+    if (!resource.has_reservation()) {
+      return Error(
+          "Resource " + stringify(resource) +
+          " does not have the 'reservation' field set");
+    }
+  }
+
+  return None();
+}
+
+
 // Validates the DiskInfos specified in the given resources (if
 // exist). Returns error if any DiskInfo is found invalid or
 // unsupported.
@@ -66,7 +82,7 @@ Option<Error> validateDiskInfo(const RepeatedPtrField<Resource>& resources)
     if (resource.disk().has_persistence()) {
       if (Resources::isUnreserved(resource)) {
         return Error(
-            "Persistent volumes cannot be created from unreserved resources.");
+            "Persistent volumes cannot be created from unreserved resources");
       }
       if (!resource.disk().has_volume()) {
         return Error("Expecting 'volume' to be set for persistent volume");
@@ -530,6 +546,73 @@ Option<Error> validate(
 
 
 namespace operation {
+
+Option<Error> validate(
+    const Offer::Operation::Reserve& reserve,
+    const string& role,
+    const string& principal)
+{
+  Option<Error> error = resource::validate(reserve.resources());
+  if (error.isSome()) {
+    return Error("Invalid resources: " + error.get().message);
+  }
+
+  error = resource::validateDynamicReservation(reserve.resources());
+  if (error.isSome()) {
+    return Error("Not a dynamic reservation: " + error.get().message);
+  }
+
+  foreach (const Resource& resource, reserve.resources()) {
+    if (resource.role() != role) {
+      return Error(
+          "The reserved resource's role \"" + resource.role() +
+          "\" does not match the framework's role \"" +
+          role + "\"");
+    }
+
+    if (resource.reservation().principal() != principal) {
+      return Error(
+          "The reserved resource's principal \"" +
+          stringify(resource.reservation().principal()) +
+          "\" does not match the framework's principal \"" +
+          stringify(principal) + "\"");
+    }
+
+    if (Resources::isPersistentVolume(resource)) {
+      return Error("A persistent volume " + stringify(resource) +
+                   " must already be reserved");
+    }
+  }
+
+  return None();
+}
+
+
+Option<Error> validate(const Offer::Operation::Unreserve& unreserve)
+{
+  Option<Error> error = resource::validate(unreserve.resources());
+  if (error.isSome()) {
+    return Error("Invalid resources: " + error.get().message);
+  }
+
+  error = resource::validateDynamicReservation(unreserve.resources());
+  if (error.isSome()) {
+    return Error("Not a dynamic reservation: " + error.get().message);
+  }
+
+  foreach (const Resource& resource, unreserve.resources()) {
+    if (Resources::isPersistentVolume(resource)) {
+      return Error(
+          "A dynamically reserved persistent volume " +
+          stringify(resource) +
+          " cannot be unreserved directly. Please destroy the persistent"
+          " volume first then unreserve the resource");
+    }
+  }
+
+  return None();
+}
+
 
 Option<Error> validate(
     const Offer::Operation::Create& create,

@@ -81,6 +81,17 @@ Option<Error> validate(
 
 namespace operation {
 
+// Validates the RESERVE operation.
+Option<Error> validate(
+    const Offer::Operation::Reserve& reserve,
+    const std::string& role,
+    const std::string& principal);
+
+
+// Validates the UNRESERVE operation.
+Option<Error> validate(const Offer::Operation::Unreserve& unreserve);
+
+
 // Validates the CREATE operation. We need slave's checkpointed
 // resources so that we can validate persistence ID uniqueness.
 Option<Error> validate(
