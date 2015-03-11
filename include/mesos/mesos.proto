@@ -394,6 +394,26 @@ message Resource {
   optional Value.Set set = 5;
   optional string role = 6 [default = "*"];
 
+  message ReservationInfo {
+    // Describes a dynamic reservation. A dynamic reservation is
+    // acquired by an operator via the '/reserve' HTTP endpoint or by
+    // a framework via the offer cycle by sending back an
+    // 'Offer::Operation::Reserve' message.
+    // NOTE: We currently do not allow frameworks with role "*" to
+    // make dynamic reservations.
+
+    // This field indicates the principal of the operator or framework
+    // that reserved this resource. It is used in conjunction with the
+    // "unreserve" ACL to determine whether the entity attempting to
+    // unreserve this resource is permitted to do so.
+    required string principal = 1;
+  }
+
+  // If this is set, this resource was dynamically reserved by an
+  // operator or a framework. Otherwise, this resource is either unreserved
+  // or statically reserved by an operator via the --resources flag.
+  optional ReservationInfo reservation = 8;
+
   message DiskInfo {
     // Describes a persistent disk volume.
     // A persistent disk volume will not be automatically garbage
