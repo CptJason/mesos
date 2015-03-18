@@ -177,8 +177,14 @@ public:
 
   // Returns a Resources object with the same amount of each resource
   // type as these Resources, but with all Resource objects marked as
-  // the specified role.
-  Resources flatten(const std::string& role = "*") const;
+  // the specified (role, reservation) pair. This is used to cross
+  // reservation boundaries without affecting the actual resources.
+  // If the optional ReservationInfo is given, the resource's
+  // 'reservation' field is set. Otherwise, the resource's
+  // 'reservation' field is not set.
+  Resources flatten(
+      const std::string& role = "*",
+      const Option<Resource::ReservationInfo>& reservation = None()) const;
 
   // Finds a Resources object with the same amount of each resource
   // type as "targets" from these Resources. The roles specified in
