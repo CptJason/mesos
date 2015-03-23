@@ -587,6 +587,529 @@ TYPED_TEST(ReservationTest, DropReserveTooLarge)
   this->Shutdown();
 }
 
+
+// This test verifies that CheckpointResourcesMessages are sent to the
+// slave when a framework reserve/unreserves resources, and
+// the resources in the messages correctly reflect the resources that
+// need to be checkpointed on the slave.
+TYPED_TEST(ReservationTest, SendingCheckpointResourcesMessage)
+{
+  FrameworkInfo frameworkInfo = DEFAULT_FRAMEWORK_INFO;
+  frameworkInfo.set_role("role");
+
+  master::Flags masterFlags = this->CreateMasterFlags();
+  masterFlags.roles = frameworkInfo.role();
+
+  Try<PID<Master>> master = this->StartMaster(masterFlags);
+  ASSERT_SOME(master);
+
+  slave::Flags slaveFlags = this->CreateSlaveFlags();
+  slaveFlags.resources = "cpus:8;mem:4096;disk:0;ports:[]";
+
+  Try<PID<Slave>> slave = this->StartSlave(slaveFlags);
+  ASSERT_SOME(slave);
+
+  MockScheduler sched;
+  MesosSchedulerDriver driver(
+      &sched, frameworkInfo, master.get(), DEFAULT_CREDENTIAL);
+
+  EXPECT_CALL(sched, registered(&driver, _, _));
+
+  Future<vector<Offer>> offers;
+  EXPECT_CALL(sched, resourceOffers(&driver, _))
+    .WillOnce(FutureArg<1>(&offers))
+    .WillRepeatedly(Return());
+
+  driver.start();
+
+  Resource::ReservationInfo reservation =
+    createReservationInfo(frameworkInfo.principal());
+
+  Resources unreserved1 = Resources::parse("cpus:8").get();
+  Resources reserved1 = unreserved1.flatten(frameworkInfo.role(), reservation);
+
+  Resources unreserved2 = Resources::parse("mem:2048").get();
+  Resources reserved2 = unreserved2.flatten(frameworkInfo.role(), reservation);
+
+  AWAIT_READY(offers);
+  ASSERT_EQ(offers.get().size(), 1u);
+
+  Offer offer = offers.get()[0];
+
+  Future<CheckpointResourcesMessage> message3 =
+    FUTURE_PROTOBUF(CheckpointResourcesMessage(), _, _);
+
+  Future<CheckpointResourcesMessage> message2 =
+    FUTURE_PROTOBUF(CheckpointResourcesMessage(), _, _);
+
+  Future<CheckpointResourcesMessage> message1 =
+    FUTURE_PROTOBUF(CheckpointResourcesMessage(), _, _);
+
+  driver.acceptOffers(
+      { offer.id() },
+      { RESERVE(reserved1), RESERVE(reserved2), UNRESERVE(reserved1) });
+
+  // NOTE: Currently, we send one message per operation. But this is
+  // an implementation detail which is subject to change.
+  AWAIT_READY(message1);
+  EXPECT_EQ(Resources(message1.get().resources()), reserved1);
+
+  AWAIT_READY(message2);
+  EXPECT_EQ(Resources(message2.get().resources()), reserved1 + reserved2);
+
+  AWAIT_READY(message3);
+  EXPECT_EQ(Resources(message3.get().resources()), reserved2);
+
+  driver.stop();
+  driver.join();
+
+  this->Shutdown();
+}
+
+
+// This test verifies that the slave checkpoints the resources for
+// dynamic reservations to the disk, recovers them upon restart, and
+// sends them to the master during re-registration.
+TYPED_TEST(ReservationTest, ResourcesCheckpointing)
+{
+  FrameworkInfo frameworkInfo = DEFAULT_FRAMEWORK_INFO;
+  frameworkInfo.set_role("role");
+
+  master::Flags masterFlags = this->CreateMasterFlags();
+  masterFlags.roles = frameworkInfo.role();
+
+  Try<PID<Master>> master = this->StartMaster(masterFlags);
+  ASSERT_SOME(master);
+
+  slave::Flags slaveFlags = this->CreateSlaveFlags();
+  slaveFlags.resources = "cpus:8;mem:4096;disk:0;ports:[]";
+
+  Try<PID<Slave>> slave = this->StartSlave(slaveFlags);
+  ASSERT_SOME(slave);
+
+  MockScheduler sched;
+  MesosSchedulerDriver driver(
+      &sched, frameworkInfo, master.get(), DEFAULT_CREDENTIAL);
+
+  EXPECT_CALL(sched, registered(&driver, _, _));
+
+  Future<vector<Offer>> offers;
+  EXPECT_CALL(sched, resourceOffers(&driver, _))
+    .WillOnce(FutureArg<1>(&offers))
+    .WillRepeatedly(Return());
+
+  driver.start();
+
+  Resources unreserved = Resources::parse("cpus:8;mem:2048").get();
+  Resources reserved = unreserved.flatten(
+      frameworkInfo.role(), createReservationInfo(frameworkInfo.principal()));
+
+  AWAIT_READY(offers);
+  ASSERT_EQ(offers.get().size(), 1u);
+
+  Offer offer = offers.get()[0];
+
+  Future<CheckpointResourcesMessage> checkpointResources =
+    FUTURE_PROTOBUF(CheckpointResourcesMessage(), _, slave.get());
+
+  driver.acceptOffers({ offer.id() }, { RESERVE(reserved) });
+
+  AWAIT_READY(checkpointResources);
+
+  // Restart the slave.
+  this->Stop(slave.get());
+
+  Future<ReregisterSlaveMessage> reregisterSlave =
+    FUTURE_PROTOBUF(ReregisterSlaveMessage(), _, _);
+
+  slave = this->StartSlave(slaveFlags);
+  ASSERT_SOME(slave);
+
+  AWAIT_READY(reregisterSlave);
+  EXPECT_EQ(reregisterSlave.get().checkpointed_resources(), reserved);
+
+  driver.stop();
+  driver.join();
+
+  this->Shutdown();
+}
+
+
+// This test verifies the case where a slave that has checkpointed
+// dynamic reservations reregisters with a failed over master, and the
+// dynamic reservations are later correctly offered to the framework.
+TYPED_TEST(ReservationTest, MasterFailover)
+{
+  FrameworkInfo frameworkInfo = DEFAULT_FRAMEWORK_INFO;
+  frameworkInfo.set_role("role");
+
+  master::Flags masterFlags = this->CreateMasterFlags();
+  masterFlags.roles = frameworkInfo.role();
+
+  Try<PID<Master>> master = this->StartMaster(masterFlags);
+  ASSERT_SOME(master);
+
+  StandaloneMasterDetector detector(master.get());
+
+  slave::Flags slaveFlags = this->CreateSlaveFlags();
+  slaveFlags.resources = "cpus:8;mem:2048";
+
+  Try<PID<Slave>> slave = this->StartSlave(&detector, slaveFlags);
+  ASSERT_SOME(slave);
+
+  MockScheduler sched;
+  TestingMesosSchedulerDriver driver(&sched, &detector, frameworkInfo);
+
+  EXPECT_CALL(sched, registered(&driver, _, _));
+
+  Future<vector<Offer>> offers1;
+  EXPECT_CALL(sched, resourceOffers(&driver, _))
+    .WillOnce(FutureArg<1>(&offers1))
+    .WillRepeatedly(Return());
+
+  driver.start();
+
+  Resources unreserved = Resources::parse("cpus:8;mem:2048").get();
+  Resources reserved = unreserved.flatten(
+      frameworkInfo.role(), createReservationInfo(frameworkInfo.principal()));
+
+  AWAIT_READY(offers1);
+  ASSERT_EQ(offers1.get().size(), 1u);
+
+  Offer offer1 = offers1.get()[0];
+
+  Future<CheckpointResourcesMessage> checkpointResources =
+    FUTURE_PROTOBUF(CheckpointResourcesMessage(), _, slave.get());
+
+  driver.acceptOffers({ offer1.id() }, { RESERVE(reserved) });
+
+  AWAIT_READY(checkpointResources);
+
+  // This is to make sure CheckpointResourcesMessage is processed.
+  process::Clock::pause();
+  process::Clock::settle();
+  process::Clock::resume();
+
+  // Simulate failed over master by restarting the master.
+  this->Stop(master.get());
+
+  EXPECT_CALL(sched, disconnected(&driver));
+
+  EXPECT_CALL(sched, registered(&driver, _, _));
+
+  Future<SlaveReregisteredMessage> slaveReregistered =
+    FUTURE_PROTOBUF(SlaveReregisteredMessage(), _, _);
+
+  Future<vector<Offer>> offers2;
+  EXPECT_CALL(sched, resourceOffers(&driver, _))
+    .WillOnce(FutureArg<1>(&offers2))
+    .WillRepeatedly(Return());
+
+  master = this->StartMaster(masterFlags);
+  ASSERT_SOME(master);
+
+  // Simulate a new master detected event on the slave so that the
+  // slave will do a re-registration.
+  detector.appoint(master.get());
+
+  AWAIT_READY(slaveReregistered);
+
+  AWAIT_READY(offers2);
+  ASSERT_EQ(offers2.get().size(), 1u);
+
+  Offer offer2 = offers2.get()[0];
+
+  EXPECT_TRUE(Resources(offer2.resources()).contains(reserved));
+
+  driver.stop();
+  driver.join();
+
+  this->Shutdown();
+}
+
+
+// This test verifies that a slave can restart as long as the
+// checkpointed resources it recovers are compatible with the
+// slave resources specified using the '--resources' flag.
+TYPED_TEST(ReservationTest, CompatibleCheckpointedResources)
+{
+  FrameworkInfo frameworkInfo = DEFAULT_FRAMEWORK_INFO;
+  frameworkInfo.set_role("role");
+
+  master::Flags masterFlags = this->CreateMasterFlags();
+  masterFlags.roles = frameworkInfo.role();
+
+  Try<PID<Master>> master = this->StartMaster(masterFlags);
+  ASSERT_SOME(master);
+
+  slave::Flags slaveFlags = this->CreateSlaveFlags();
+  slaveFlags.resources = "cpus:8;mem:4096;disk:0;ports:[]";
+
+  MockExecutor exec(DEFAULT_EXECUTOR_ID);
+  TestContainerizer containerizer(&exec);
+  StandaloneMasterDetector detector(master.get());
+
+  MockSlave slave1(slaveFlags, &detector, &containerizer);
+  spawn(slave1);
+
+  MockScheduler sched;
+  MesosSchedulerDriver driver(
+      &sched, frameworkInfo, master.get(), DEFAULT_CREDENTIAL);
+
+  EXPECT_CALL(sched, registered(&driver, _, _));
+
+  Future<vector<Offer>> offers;
+  EXPECT_CALL(sched, resourceOffers(&driver, _))
+    .WillOnce(FutureArg<1>(&offers))
+    .WillRepeatedly(Return());
+
+  driver.start();
+
+  Resources unreserved = Resources::parse("cpus:8;mem:2048").get();
+  Resources reserved = unreserved.flatten(
+      frameworkInfo.role(), createReservationInfo(frameworkInfo.principal()));
+
+  AWAIT_READY(offers);
+  ASSERT_EQ(offers.get().size(), 1u);
+
+  Offer offer = offers.get()[0];
+
+  Future<CheckpointResourcesMessage> checkpointResources =
+    FUTURE_PROTOBUF(CheckpointResourcesMessage(), _, _);
+
+  driver.acceptOffers({ offer.id() }, { RESERVE(reserved) });
+
+  AWAIT_READY(checkpointResources);
+
+  terminate(slave1);
+  wait(slave1);
+
+  // Simulate a reboot of the slave machine by modify the boot ID.
+  ASSERT_SOME(os::write(slave::paths::getBootIdPath(
+      slave::paths::getMetaRootDir(slaveFlags.work_dir)),
+      "rebooted! ;)"));
+
+  // Change the slave resources so that it is compatible with the
+  // checkpointed resources.
+  slaveFlags.resources = "cpus:12;mem:2048";
+
+  MockSlave slave2(slaveFlags, &detector, &containerizer);
+
+  Future<Future<Nothing>> recover;
+  EXPECT_CALL(slave2, __recover(_))
+    .WillOnce(DoAll(FutureArg<0>(&recover), Return()));
+
+  spawn(slave2);
+
+  AWAIT_READY(recover);
+  AWAIT_READY(recover.get());
+
+  terminate(slave2);
+  wait(slave2);
+
+  driver.stop();
+  driver.join();
+
+  this->Shutdown();
+}
+
+
+// This test verifies that a slave can restart as long as the
+// checkpointed resources it recovers are compatible with the
+// slave resources specified using the '--resources' flag.
+TYPED_TEST(ReservationTest,
+           CompatibleCheckpointedResourcesWithPersistentVolumes)
+{
+  FrameworkInfo frameworkInfo = DEFAULT_FRAMEWORK_INFO;
+  frameworkInfo.set_role("role");
+
+  master::Flags masterFlags = this->CreateMasterFlags();
+  masterFlags.roles = frameworkInfo.role();
+
+  Try<PID<Master>> master = this->StartMaster(masterFlags);
+  ASSERT_SOME(master);
+
+  slave::Flags slaveFlags = this->CreateSlaveFlags();
+  slaveFlags.resources = "cpus:8;mem:4096;disk:1024;ports:[]";
+
+  MockExecutor exec(DEFAULT_EXECUTOR_ID);
+  TestContainerizer containerizer(&exec);
+  StandaloneMasterDetector detector(master.get());
+
+  MockSlave slave1(slaveFlags, &detector, &containerizer);
+  spawn(slave1);
+
+  MockScheduler sched;
+  MesosSchedulerDriver driver(
+      &sched, frameworkInfo, master.get(), DEFAULT_CREDENTIAL);
+
+  EXPECT_CALL(sched, registered(&driver, _, _));
+
+  Future<vector<Offer>> offers;
+  EXPECT_CALL(sched, resourceOffers(&driver, _))
+    .WillOnce(FutureArg<1>(&offers))
+    .WillRepeatedly(Return());
+
+  driver.start();
+
+  Resource::ReservationInfo reservation =
+    createReservationInfo(frameworkInfo.principal());
+
+  Resources unreserved = Resources::parse("cpus:8;mem:2048").get();
+  Resources reserved = unreserved.flatten(frameworkInfo.role(), reservation);
+
+  Resource unreserved_disk = Resources::parse("disk", "1024", "*").get();
+
+  Resource reserved_disk = unreserved_disk;
+  reserved_disk.set_role(frameworkInfo.role());
+  reserved_disk.mutable_reservation()->CopyFrom(
+      createReservationInfo(frameworkInfo.principal()));
+
+  Resource volume = reserved_disk;
+  volume.mutable_disk()->CopyFrom(
+      createDiskInfo("persistence_id", "container_path"));
+
+  AWAIT_READY(offers);
+  ASSERT_EQ(offers.get().size(), 1u);
+
+  Offer offer = offers.get()[0];
+
+  Future<CheckpointResourcesMessage> message2 =
+    FUTURE_PROTOBUF(CheckpointResourcesMessage(), _, _);
+
+  Future<CheckpointResourcesMessage> message1 =
+    FUTURE_PROTOBUF(CheckpointResourcesMessage(), _, _);
+
+  driver.acceptOffers(
+      { offer.id() },
+      { RESERVE(reserved + reserved_disk), CREATE(volume) });
+
+  // NOTE: Currently, we send one message per operation. But this is
+  // an implementation detail which is subject to change.
+  AWAIT_READY(message1);
+  EXPECT_EQ(Resources(message1.get().resources()), reserved + reserved_disk);
+
+  AWAIT_READY(message2);
+  EXPECT_EQ(Resources(message2.get().resources()), reserved + volume);
+
+  terminate(slave1);
+  wait(slave1);
+
+  // Simulate a reboot of the slave machine by modify the boot ID.
+  ASSERT_SOME(os::write(slave::paths::getBootIdPath(
+      slave::paths::getMetaRootDir(slaveFlags.work_dir)),
+      "rebooted! ;)"));
+
+  // Change the slave resources so that it is not compatible with the
+  // checkpointed resources.
+  slaveFlags.resources = "cpus:12;mem:2048;disk:1024";
+
+  MockSlave slave2(slaveFlags, &detector, &containerizer);
+
+  Future<Future<Nothing>> recover;
+  EXPECT_CALL(slave2, __recover(_))
+    .WillOnce(DoAll(FutureArg<0>(&recover), Return()));
+
+  spawn(slave2);
+
+  AWAIT_READY(recover);
+  AWAIT_READY(recover.get());
+
+  terminate(slave2);
+  wait(slave2);
+
+  driver.stop();
+  driver.join();
+
+  this->Shutdown();
+}
+
+
+// This test verifies that a slave will refuse to start if the
+// checkpointed resources it recovers are not compatible with the
+// slave resources specified using the '--resources' flag.
+TYPED_TEST(ReservationTest, IncompatibleCheckpointedResources)
+{
+  FrameworkInfo frameworkInfo = DEFAULT_FRAMEWORK_INFO;
+  frameworkInfo.set_role("role");
+
+  master::Flags masterFlags = this->CreateMasterFlags();
+  masterFlags.roles = frameworkInfo.role();
+
+  Try<PID<Master>> master = this->StartMaster(masterFlags);
+  ASSERT_SOME(master);
+
+  slave::Flags slaveFlags = this->CreateSlaveFlags();
+  slaveFlags.resources = "cpus:8;mem:4096;disk:0;ports:[]";
+
+  MockExecutor exec(DEFAULT_EXECUTOR_ID);
+  TestContainerizer containerizer(&exec);
+  StandaloneMasterDetector detector(master.get());
+
+  MockSlave slave1(slaveFlags, &detector, &containerizer);
+  spawn(slave1);
+
+  MockScheduler sched;
+  MesosSchedulerDriver driver(
+      &sched, frameworkInfo, master.get(), DEFAULT_CREDENTIAL);
+
+  EXPECT_CALL(sched, registered(&driver, _, _));
+
+  Future<vector<Offer>> offers;
+  EXPECT_CALL(sched, resourceOffers(&driver, _))
+    .WillOnce(FutureArg<1>(&offers))
+    .WillRepeatedly(Return());
+
+  driver.start();
+
+  Resources unreserved = Resources::parse("cpus:8;mem:2048").get();
+  Resources reserved = unreserved.flatten(
+      frameworkInfo.role(), createReservationInfo(frameworkInfo.principal()));
+
+  AWAIT_READY(offers);
+  ASSERT_EQ(offers.get().size(), 1u);
+
+  Offer offer = offers.get()[0];
+
+  Future<CheckpointResourcesMessage> checkpointResources =
+    FUTURE_PROTOBUF(CheckpointResourcesMessage(), _, _);
+
+  driver.acceptOffers({ offer.id() }, { RESERVE(reserved) });
+
+  AWAIT_READY(checkpointResources);
+
+  terminate(slave1);
+  wait(slave1);
+
+  // Simulate a reboot of the slave machine by modify the boot ID.
+  ASSERT_SOME(os::write(slave::paths::getBootIdPath(
+      slave::paths::getMetaRootDir(slaveFlags.work_dir)),
+      "rebooted! ;)"));
+
+  // Change the slave resources so that it's not compatible with the
+  // checkpointed resources.
+  slaveFlags.resources = "cpus:4;mem:2048";
+
+  MockSlave slave2(slaveFlags, &detector, &containerizer);
+
+  Future<Future<Nothing>> recover;
+  EXPECT_CALL(slave2, __recover(_))
+    .WillOnce(DoAll(FutureArg<0>(&recover), Return()));
+
+  spawn(slave2);
+
+  AWAIT_READY(recover);
+  AWAIT_FAILED(recover.get());
+
+  terminate(slave2);
+  wait(slave2);
+
+  driver.stop();
+  driver.join();
+
+  this->Shutdown();
+}
+
 }  // namespace tests {
 }  // namespace internal {
 }  // namespace mesos {

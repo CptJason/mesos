@@ -26,8 +26,8 @@ namespace mesos {
 
 bool needCheckpointing(const Resource& resource)
 {
-  // TODO(mpark): Consider framework reservations.
-  return Resources::isPersistentVolume(resource);
+  return Resources::isDynamicReservation(resource) ||
+         Resources::isPersistentVolume(resource);
 }
 
 
@@ -42,23 +42,25 @@ Try<Resources> applyCheckpointedResources(
       return Error("Unexpected checkpointed resources " + stringify(resource));
     }
 
-    // TODO(jieyu): Apply RESERVE operation if 'resource' is
-    // dynamically reserved.
+    Resource stripped = resource;
+
+    if (Resources::isDynamicReservation(resource)) {
+      stripped.set_role("*");
+      stripped.clear_reservation();
+    }
 
     if (Resources::isPersistentVolume(resource)) {
-      Offer::Operation create;
-      create.set_type(Offer::Operation::CREATE);
-      create.mutable_create()->add_volumes()->CopyFrom(resource);
-
-      Try<Resources> applied = totalResources.apply(create);
-      if (applied.isError()) {
-        return Error(
-            "Cannot find transition for checkpointed resource " +
-            stringify(resource));
-      }
-
-      totalResources = applied.get();
+      stripped.clear_disk();
     }
+
+    if (!totalResources.contains(stripped)) {
+      return Error(
+          "Incompatible slave resources: " + stringify(totalResources) +
+          " does not contain " + stringify(stripped));
+    }
+
+    totalResources -= stripped;
+    totalResources += resource;
   }
 
   return totalResources;

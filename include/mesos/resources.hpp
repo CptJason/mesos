@@ -94,6 +94,9 @@ public:
   // Tests if the given Resource object is empty.
   static bool isEmpty(const Resource& resource);
 
+  // Tests if the given Resource object is a dynamic reservation.
+  static bool isDynamicReservation(const Resource& resource);
+
   // Tests if the given Resource object is a persistent volume.
   static bool isPersistentVolume(const Resource& resource);
 

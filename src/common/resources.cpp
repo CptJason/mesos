@@ -439,6 +439,12 @@ bool Resources::isEmpty(const Resource& resource)
 }
 
 
+bool Resources::isDynamicReservation(const Resource& resource)
+{
+  return resource.has_reservation();
+}
+
+
 bool Resources::isPersistentVolume(const Resource& resource)
 {
   return resource.has_disk() && resource.disk().has_persistence();
