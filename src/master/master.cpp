@@ -3007,6 +3007,14 @@ void Master::reregisterSlave(
     const vector<Archive::Framework>& completedFrameworks,
     const string& version)
 {
+  LOG(INFO) << "MPARK: UPID:" << from << " SlaveInfo: " << slaveInfo;
+  Slave* slave_ = getSlave(slaveInfo.id());
+  if (slave_) {
+    LOG(INFO) << "MPARK: Slave: " << *slave_;
+  } else {
+    LOG(INFO) << "MPARK: Slave not available";
+  }
+
   ++metrics->messages_reregister_slave;
 
   if (authenticating.contains(from)) {

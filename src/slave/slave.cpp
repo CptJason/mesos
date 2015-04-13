@@ -592,6 +592,8 @@ Nothing Slave::detachFile(const string& path)
 
 void Slave::detected(const Future<Option<MasterInfo> >& _master)
 {
+  LOG(INFO) << "MPARK: Slave::detected";
+
   CHECK(state == DISCONNECTED ||
         state == RUNNING ||
         state == TERMINATING) << state;
@@ -944,30 +946,44 @@ void Slave::reregistered(
 
 void Slave::doReliableRegistration(Duration maxBackoff)
 {
+  LOG(INFO) << "MPARK: Slave::doReliableRegistration";
+
   if (master.isNone()) {
+    LOG(INFO) << "MPARK: No master present!";
     LOG(INFO) << "Skipping registration because no master present";
     return;
   }
 
   if (credential.isSome() && !authenticated) {
+    LOG(INFO) << "MPARK: Not authenticated!";
     LOG(INFO) << "Skipping registration because not authenticated";
     return;
   }
 
   if (state == RUNNING) { // Slave (re-)registered with the master.
+    LOG(INFO) << "MPARK: Already re-registered!";
     return;
   }
 
   if (state == TERMINATING) {
+    LOG(INFO) << "MPARK: Terminating!";
     LOG(INFO) << "Skipping registration because slave is terminating";
     return;
   }
 
+  LOG(INFO) << "MPARK: CHECK(state == DISCONNECTED)";
+
   CHECK(state == DISCONNECTED) << state;
+
+  LOG(INFO) << "MPARK: CHECK_NE(\"clean_up\", flags.recover)";
 
   CHECK_NE("cleanup", flags.recover);
 
+  LOG(INFO) << "MPARK: CHECKs passed";
+
   if (!info.has_id()) {
+    LOG(INFO) << "MPARK: Slave registering!";
+
     // Registering for the first time.
     RegisterSlaveMessage message;
     message.set_version(MESOS_VERSION);
@@ -978,6 +994,8 @@ void Slave::doReliableRegistration(Duration maxBackoff)
 
     send(master.get(), message);
   } else {
+    LOG(INFO) << "MPARK: Slave re-registering!";
+
     // Re-registering, so send tasks running.
     ReregisterSlaveMessage message;
     message.set_version(MESOS_VERSION);
@@ -1000,6 +1018,10 @@ void Slave::doReliableRegistration(Duration maxBackoff)
         }
       }
 
+      if (framework->executors.empty()) {
+        LOG(INFO) << "MPARK: framework '" << framework->id
+                  << "' has no executors!";
+      }
       foreachvalue (Executor* executor, framework->executors) {
         // Add launched, terminated, and queued tasks.
         // Note that terminated executors will only have terminated
@@ -1032,12 +1054,18 @@ void Slave::doReliableRegistration(Duration maxBackoff)
           // Ignore terminated executors because they do not consume
           // any resources.
           if (executor->state != Executor::TERMINATED) {
+            LOG(INFO) << "MPARK: Adding executor '" << executor->id
+                      << "' to ReregisterSlaveMessage::executor_infos";
+
             ExecutorInfo* executorInfo = message.add_executor_infos();
             executorInfo->MergeFrom(executor->info);
 
             // Scheduler Driver will ensure the framework id is set in
             // ExecutorInfo, effectively making it a required field.
             CHECK(executorInfo->has_framework_id());
+          } else {
+            LOG(INFO) << "MPARK: Executor '" << executor->id
+                      << "' is terminated!";
           }
         }
       }
@@ -3632,6 +3660,8 @@ void Slave::_checkDiskUsage(const Future<double>& usage)
 
 Future<Nothing> Slave::recover(const Result<state::State>& state)
 {
+  LOG(INFO) << "MPARK: Slave::recover";
+
   if (state.isError()) {
     return Failure(state.error());
   }
@@ -3698,12 +3728,15 @@ Future<Nothing> Slave::recover(const Result<state::State>& state)
 Future<Nothing> Slave::_recoverContainerizer(
     const Option<state::SlaveState>& state)
 {
+  LOG(INFO) << "MPARK: Slave::_recoverContainerizer";
   return containerizer->recover(state);
 }
 
 
 Future<Nothing> Slave::_recover()
 {
+  LOG(INFO) << "MPARK: Slave::_recover";
+
   foreachvalue (Framework* framework, frameworks) {
     foreachvalue (Executor* executor, framework->executors) {
       // Set up callback for executor termination.
@@ -3748,6 +3781,9 @@ Future<Nothing> Slave::_recover()
   }
 
   if (!frameworks.empty() && flags.recover == "reconnect") {
+    LOG(INFO) << "MPARK: Delaying call to Slave::reregisterExecutorTimeout by "
+              << EXECUTOR_REREGISTER_TIMEOUT;
+
     // Cleanup unregistered executors after a delay.
     delay(EXECUTOR_REREGISTER_TIMEOUT,
           self(),
@@ -3765,7 +3801,11 @@ Future<Nothing> Slave::_recover()
 
 void Slave::__recover(const Future<Nothing>& future)
 {
+  LOG(INFO) << "MPARK: Slave::__recover";
+
   if (!future.isReady()) {
+    LOG(INFO) << "MPARK: !future.isReady()";
+
     EXIT(1)
       << "Failed to perform recovery: "
       << (future.isFailed() ? future.failure() : "future discarded") << "\n"

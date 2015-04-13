@@ -270,6 +270,8 @@ Future<Nothing> StatusUpdateManagerProcess::recover(
     }
   }
 
+  LOG(INFO) << "MPARK: Completing StatusUpdateManagerProces::recover";
+
   return Nothing();
 }
 
