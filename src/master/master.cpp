@@ -3008,6 +3008,10 @@ void Master::reregisterSlave(
     const string& version)
 {
   LOG(INFO) << "MPARK: UPID:" << from << " SlaveInfo: " << slaveInfo;
+  LOG(INFO) << "MPARK: linux_pid: " << slaveInfo.linux_pid();
+  LOG(INFO) << "MPARK: timestamp: " << slaveInfo.timestamp();
+  LOG(INFO) << "MPARK: filename: " << slaveInfo.filename();
+  LOG(INFO) << "MPARK: line: " << slaveInfo.line();
   Slave* slave_ = getSlave(slaveInfo.id());
   if (slave_) {
     LOG(INFO) << "MPARK: Slave: " << *slave_;

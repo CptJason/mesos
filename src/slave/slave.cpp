@@ -981,13 +981,19 @@ void Slave::doReliableRegistration(Duration maxBackoff)
 
   LOG(INFO) << "MPARK: CHECKs passed";
 
+  SlaveInfo info_ = info;
+  info_.set_linux_pid(::getpid());
+  info_.set_timestamp(std::time(NULL));
+  info_.set_filename(__FILE__);
+  info_.set_line(__LINE__);
+
   if (!info.has_id()) {
     LOG(INFO) << "MPARK: Slave registering!";
 
     // Registering for the first time.
     RegisterSlaveMessage message;
     message.set_version(MESOS_VERSION);
-    message.mutable_slave()->CopyFrom(info);
+    message.mutable_slave()->CopyFrom(info_);
 
     // Include checkpointed resources.
     message.mutable_checkpointed_resources()->CopyFrom(checkpointedResources);
@@ -1003,7 +1009,7 @@ void Slave::doReliableRegistration(Duration maxBackoff)
     // Include checkpointed resources.
     message.mutable_checkpointed_resources()->CopyFrom(checkpointedResources);
 
-    message.mutable_slave()->CopyFrom(info);
+    message.mutable_slave()->CopyFrom(info_);
 
     foreachvalue (Framework* framework, frameworks) {
       // TODO(bmahler): We need to send the executors for these
